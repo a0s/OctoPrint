@@ -166,7 +166,9 @@ class CuraPlugin(octoprint.plugin.SlicerPlugin,
 			type="cura",
 			name="CuraEngine",
 			same_device=True,
-			progress_report=True
+			progress_report=True,
+			source_file_types=["stl"],
+			destination_extensions=["gco", "gcode", "g"]
 		)
 
 	def get_slicer_default_profile(self):
@@ -191,9 +193,6 @@ class CuraPlugin(octoprint.plugin.SlicerPlugin,
 		return octoprint.slicing.SlicingProfile(properties["type"], "unknown", profile_dict, display_name=display_name, description=description)
 
 	def save_slicer_profile(self, path, profile, allow_overwrite=True, overrides=None):
-		if os.path.exists(path) and not allow_overwrite:
-			raise octoprint.slicing.ProfileAlreadyExists("cura", profile.name)
-
 		new_profile = Profile.merge_profile(profile.data, overrides=overrides)
 
 		if profile.display_name is not None:

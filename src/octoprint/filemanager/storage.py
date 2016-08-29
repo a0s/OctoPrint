@@ -10,6 +10,7 @@ import logging
 import os
 import pylru
 import tempfile
+import shutil
 
 try:
 	from os import scandir
@@ -316,6 +317,10 @@ class LocalFileStorage(StorageInterface):
 
 		self._metadata_cache = pylru.lrucache(10)
 
+		from slugify import Slugify
+		self._slugify = Slugify()
+		self._slugify.safe_chars = "-_.()[] "
+
 		self._old_metadata = None
 		self._initialize_metadata()
 
@@ -399,7 +404,7 @@ class LocalFileStorage(StorageInterface):
 		folder_path = os.path.join(path, name)
 		if os.path.exists(folder_path):
 			if not ignore_existing:
-				raise RuntimeError("{sanitized_foldername} does already exist in {virtual_path}".format(**locals()))
+				raise RuntimeError("{name} does already exist in {path}".format(**locals()))
 		else:
 			os.mkdir(folder_path)
 
@@ -416,7 +421,7 @@ class LocalFileStorage(StorageInterface):
 		if ".metadata.yaml" in contents:
 			contents.remove(".metadata.yaml")
 		if contents and not recursive:
-			raise RuntimeError("{sanitized_foldername} in {virtual_path} is not empty".format(**locals()))
+			raise RuntimeError("{name} in {path} is not empty".format(**locals()))
 
 		import shutil
 		shutil.rmtree(folder_path)
@@ -614,9 +619,9 @@ class LocalFileStorage(StorageInterface):
 
 	def sanitize_name(self, name):
 		"""
-		Raises a :class:`ValueError` for a ``name`` containing ``/`` or ``\``. Otherwise strips any characters from the
-		given ``name`` that are not any of the ASCII characters, digits, ``-``, ``_``, ``.``, ``(``, ``)`` or space and
-		replaces and spaces with ``_``.
+		Raises a :class:`ValueError` for a ``name`` containing ``/`` or ``\``. Otherwise
+		slugifies the given ``name`` by converting it to ASCII, leaving ``-``, ``_``, ``.``,
+		``(``, and ``)`` as is.
 		"""
 		if name is None:
 			return None
@@ -624,11 +629,11 @@ class LocalFileStorage(StorageInterface):
 		if "/" in name or "\\" in name:
 			raise ValueError("name must not contain / or \\")
 
-		import string
-		valid_chars = "-_.() {ascii}{digits}".format(ascii=string.ascii_letters, digits=string.digits)
-		sanitized_name = ''.join(c for c in name if c in valid_chars)
-		sanitized_name = sanitized_name.replace(" ", "_")
-		return sanitized_name
+		result = self._slugify(name).replace(" ", "_")
+		if result and result != "." and result != ".." and result[0] == ".":
+			# hidden files under *nix
+			result = result[1:]
+		return result
 
 	def sanitize_path(self, path):
 		"""
@@ -636,8 +641,11 @@ class LocalFileStorage(StorageInterface):
 		relative path elements (e.g. ``..``) and sanitizes folder names using :func:`sanitize_name`. Final path is the
 		absolute path including leading ``basefolder`` path.
 		"""
-		if path[0] == "/" or path[0] == ".":
+		if path[0] == "/":
 			path = path[1:]
+		elif path[0] == "." and path[1] == "/":
+			path = path[2:]
+
 		path_elements = path.split("/")
 		joined_path = self.basefolder
 		for path_element in path_elements:
@@ -898,41 +906,72 @@ class LocalFileStorage(StorageInterface):
 				# no hidden files and folders
 				continue
 
+			entry_name = entry.name
+			entry_path = entry.path
+			entry_stat = entry.stat()
+			entry_is_file = entry.is_file()
+			entry_is_dir = entry.is_dir()
+
+			sanitized = self.sanitize_name(entry_name)
+			if sanitized != entry_name:
+				# entry is not sanitized yet, let's take care of that
+				sanitized_path = os.path.join(path, sanitized)
+				sanitized_name, sanitized_ext = os.path.splitext(sanitized)
+
+				counter = 1
+				while os.path.exists(sanitized_path):
+					counter += 1
+					sanitized = self.sanitize_name("{}_({}){}".format(sanitized_name, counter, sanitized_ext))
+					sanitized_path = os.path.join(path, sanitized)
+
+				try:
+					shutil.move(entry_path, sanitized_path)
+
+					self._logger.info("Sanitized \"{}\" to \"{}\"".format(path, sanitized_path))
+
+					entry_name = sanitized
+					entry_path = sanitized_path
+					entry_stat = os.stat(sanitized_path)
+					entry_is_file = os.path.isfile(sanitized_path)
+					entry_is_dir = os.path.isdir(sanitized_path)
+				except:
+					self._logger.exception("Error while trying to rename \"{}\" to \"{}\", ignoring file".format(entry_path, sanitized_path))
+					continue
+
 			# file handling
-			if entry.is_file():
-				file_type = octoprint.filemanager.get_file_type(entry.name)
+			if entry_is_file:
+				file_type = octoprint.filemanager.get_file_type(entry_name)
 				if not file_type:
 					# only supported extensions
 					continue
 				else:
 					file_type = file_type[0]
 
-				if entry.name in metadata and isinstance(metadata[entry.name], dict):
-					entry_data = metadata[entry.name]
+				if entry.name in metadata and isinstance(metadata[entry_name], dict):
+					entry_data = metadata[entry_name]
 				else:
-					entry_data = self._add_basic_metadata(path, entry.name, save=False, metadata=metadata)
+					entry_data = self._add_basic_metadata(path, entry_name, save=False, metadata=metadata)
 					metadata_dirty = True
 
 				# TODO extract model hash from source if possible to recreate link
 
-				if not filter or filter(entry.name, entry_data):
+				if not filter or filter(entry_name, entry_data):
 					# only add files passing the optional filter
 					extended_entry_data = dict()
 					extended_entry_data.update(entry_data)
-					extended_entry_data["name"] = entry.name
+					extended_entry_data["name"] = entry_name
 					extended_entry_data["type"] = file_type
-					stat = entry.stat()
-					if stat:
-						extended_entry_data["size"] = stat.st_size
-						extended_entry_data["date"] = int(stat.st_mtime)
+					if entry_stat:
+						extended_entry_data["size"] = entry_stat.st_size
+						extended_entry_data["date"] = int(entry_stat.st_mtime)
 
 					result[entry.name] = extended_entry_data
 
 			# folder recursion
-			elif entry.is_dir() and recursive:
-				sub_result = self._list_folder(entry.path, filter=filter)
-				result[entry.name] = dict(
-					name=entry.name,
+			elif entry_is_dir and recursive:
+				sub_result = self._list_folder(entry_path, filter=filter)
+				result[entry_name] = dict(
+					name=entry_name,
 					type="folder",
 					children=sub_result
 				)

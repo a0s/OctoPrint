@@ -10,6 +10,9 @@ The documentation is located at [docs.octoprint.org](http://docs.octoprint.org).
 
 The official plugin repository can be reached at [plugins.octoprint.org](http://plugins.octoprint.org).
 
+OctoPrint's development wouldn't be possible without the [financial support by its community](http://octoprint.org/support-octoprint/).
+If you enjoy OctoPrint, please consider becoming a regular supporter!
+
 ![Screenshot](http://i.imgur.com/dF3noFp.png)
 
 You are currently looking at the source code repository of OctoPrint. If you already installed it
@@ -26,7 +29,7 @@ Contributions of all kinds are welcome, not only in the form of code but also wi
 [official documentation](http://docs.octoprint.org/) or [the public wiki](https://github.com/foosel/OctoPrint/wiki), support
 of other users in the [bug tracker](https://github.com/foosel/OctoPrint/issues),
 [the Mailinglist](https://groups.google.com/group/octoprint) or
-[the G+ Community](https://plus.google.com/communities/102771308349328485741).
+[the G+ Community](https://plus.google.com/communities/102771308349328485741) and also [financially](http://octoprint.org/support-octoprint/).
 
 If you think something is bad as it is about OctoPrint or its documentation the way it is, please help
 in any way to make it better instead of just complaining about it -- this is an Open Source Project
@@ -47,11 +50,11 @@ which is a custom SD card image that includes OctoPrint plus dependencies.
 The generic steps that should basically be done regardless of operating system
 and runtime environment are the following (as *regular
 user*, please keep your hands *off* of the `sudo` command here!) - this assumes
-you already have Python 2.7, pip and virtualenv set up:
+you already have Python 2.7, pip and virtualenv set up on your system:
 
 1. Checkout OctoPrint: `git clone https://github.com/foosel/OctoPrint.git`
 2. Change into the OctoPrint folder: `cd OctoPrint`
-3. Create a user-owned virtual environment therein: `virtualenv --system-site-packages venv`
+3. Create a user-owned virtual environment therein: `virtualenv venv`
 4. Install OctoPrint *into that virtual environment*: `./venv/bin/python setup.py install`
 
 You may then start the OctoPrint server via `/path/to/OctoPrint/venv/bin/octoprint`, see [Usage](#usage)

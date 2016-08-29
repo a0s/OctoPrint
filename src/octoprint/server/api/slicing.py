@@ -16,7 +16,7 @@ from octoprint.server.util.flask import etagged, lastmodified, conditional, \
 
 from octoprint.settings import settings as s, valid_boolean_trues
 
-from octoprint.slicing import UnknownSlicer, SlicerNotConfigured, ProfileAlreadyExists, UnknownProfile
+from octoprint.slicing import UnknownSlicer, SlicerNotConfigured, ProfileAlreadyExists, UnknownProfile, CouldNotDeleteProfile
 
 import hashlib
 
@@ -34,6 +34,8 @@ def compute_etag():
 @conditional(lambda: check_etag(compute_etag()), NOT_MODIFIED)
 @etagged(lambda _: compute_etag())
 def slicingListAll():
+	from octoprint.filemanager import get_extensions
+
 	default_slicer = s().get(["slicing", "defaultSlicer"])
 
 	if "configured" in request.values and request.values["configured"] in valid_boolean_trues:
@@ -45,12 +47,21 @@ def slicingListAll():
 	for slicer in slicers:
 		try:
 			slicer_impl = slicingManager.get_slicer(slicer, require_configured=False)
+
+			extensions = set()
+			for source_file_type in slicer_impl.get_slicer_properties().get("source_file_types", ["model"]):
+				extensions = extensions.union(get_extensions(source_file_type))
+
 			result[slicer] = dict(
 				key=slicer,
 				displayName=slicer_impl.get_slicer_properties()["name"],
 				default=default_slicer == slicer,
-				configured = slicer_impl.is_slicer_configured(),
-				profiles=_getSlicingProfilesData(slicer)
+				configured=slicer_impl.is_slicer_configured(),
+				profiles=_getSlicingProfilesData(slicer),
+				extensions=dict(
+					source=list(extensions),
+					destination=slicer_impl.get_slicer_properties().get("destination_extensions", ["gco", "gcode", "g"])
+				)
 			)
 		except (UnknownSlicer, SlicerNotConfigured):
 			# this should never happen
@@ -184,6 +195,8 @@ def slicingDelSlicerProfile(slicer, name):
 		slicingManager.delete_profile(slicer, name)
 	except UnknownSlicer:
 		return make_response("Unknown slicer {slicer}".format(**locals()), 404)
+	except CouldNotDeleteProfile as e:
+		return make_response("Could not delete profile {profile} for slicer {slicer}: {cause}".format(profile=name, slicer=slicer, cause=str(e.cause)), 500)
 
 	return NO_CONTENT
 

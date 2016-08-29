@@ -56,12 +56,12 @@ $(function() {
             // register for browser visibility tracking
 
             var prop = getHiddenProp();
-            if (!prop) return undefined;
+            if (prop) {
+                var eventName = prop.replace(/[H|h]idden/, "") + "visibilitychange";
+                document.addEventListener(eventName, updateBrowserVisibility);
 
-            var eventName = prop.replace(/[H|h]idden/, "") + "visibilitychange";
-            document.addEventListener(eventName, updateBrowserVisibility);
-
-            updateBrowserVisibility();
+                updateBrowserVisibility();
+            }
 
             // exports
 
@@ -282,8 +282,6 @@ $(function() {
         }
         log.info("... dependency resolution done");
 
-        var dataUpdater = new DataUpdater(allViewModels);
-
         //~~ Custom knockout.js bindings
 
         ko.bindingHandlers.popover = {
@@ -356,6 +354,44 @@ $(function() {
             }
         };
 
+        ko.bindingHandlers.copyWidth = {
+            init: function(element, valueAccessor, allBindings, viewModel, bindingContext) {
+                var node = ko.bindingHandlers.copyWidth._getReferenceNode(element, valueAccessor);
+                ko.bindingHandlers.copyWidth._setWidth(node, element);
+            },
+            update: function(element, valueAccessor, allBindings, viewModel, bindingContext) {
+                var node = ko.bindingHandlers.copyWidth._getReferenceNode(element, valueAccessor);
+                ko.bindingHandlers.copyWidth._setWidth(node, element);
+            },
+            _setWidth: function(node, element) {
+                var width = node.width();
+                if (!width) return;
+                if ($(element).width() == width) return;
+                element.style.width = width + "px";
+            },
+            _getReferenceNode: function(element, valueAccessor) {
+                var value = ko.utils.unwrapObservable(valueAccessor());
+                if (!value) return;
+
+                var parts = value.split(" ");
+                var node = $(element);
+                while (parts.length > 0) {
+                    var part = parts.shift();
+                    if (part == ":parent") {
+                        node = node.parent();
+                    } else {
+                        var selector = part;
+                        if (parts.length > 0) {
+                            selector += " " + parts.join(" ");
+                        }
+                        node = $(selector, node);
+                        break;
+                    }
+                }
+                return node;
+            }
+        };
+
         ko.bindingHandlers.contextMenu = {
             init: function (element, valueAccessor, allBindingsAccessor, viewModel, bindingContext) {
                 var val = ko.utils.unwrapObservable(valueAccessor());
@@ -366,6 +402,30 @@ $(function() {
                 var val = ko.utils.unwrapObservable(valueAccessor());
 
                 $(element).contextMenu(val);
+            }
+        };
+
+        // Originally from Knockstrap
+        // https://github.com/faulknercs/Knockstrap/blob/master/src/bindings/toggleBinding.js
+        // License: MIT
+        ko.bindingHandlers.toggle = {
+            init: function (element, valueAccessor) {
+                var value = valueAccessor();
+
+                if (!ko.isObservable(value)) {
+                    throw new Error('toggle binding should be used only with observable values');
+                }
+
+                $(element).on('click', function (event) {
+                    event.preventDefault();
+
+                    var previousValue = ko.utils.unwrapObservable(value);
+                    value(!previousValue);
+                });
+            },
+
+            update: function (element, valueAccessor) {
+                ko.utils.toggleDomNodeCssClass(element, 'active', ko.utils.unwrapObservable(valueAccessor()));
             }
         };
 
@@ -496,13 +556,8 @@ $(function() {
             e.preventDefault();
         });
 
-        //~~ Starting up the app
-
-        _.each(allViewModels, function(viewModel) {
-            if (viewModel.hasOwnProperty("onStartup")) {
-                viewModel.onStartup();
-            }
-        });
+        // reload overlay
+        $("#reloadui_overlay_reload").click(function() { location.reload(); });
 
         //~~ view model binding
 
@@ -593,12 +648,31 @@ $(function() {
                     }
                 });
             });
+
+            log.info("Application startup complete");
         };
 
         if (!_.has(viewModelMap, "settingsViewModel")) {
             throw new Error("settingsViewModel is missing, can't run UI")
         }
-        viewModelMap["settingsViewModel"].requestData(bindViewModels);
+
+        var dataUpdaterConnectCallback = function() {
+            log.info("Finalizing application startup");
+
+            //~~ Starting up the app
+
+            _.each(allViewModels, function(viewModel) {
+                if (viewModel.hasOwnProperty("onStartup")) {
+                    viewModel.onStartup();
+                }
+            });
+
+            viewModelMap["settingsViewModel"].requestData(bindViewModels);
+        };
+
+        log.info("Initial application setup done, connecting to server...");
+        var dataUpdater = new DataUpdater(allViewModels);
+        dataUpdater.connect(dataUpdaterConnectCallback);
     }
 );
 

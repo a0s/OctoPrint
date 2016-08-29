@@ -101,7 +101,7 @@ def load_user(id):
 	else:
 		sessionid = None
 
-	if userManager is not None:
+	if userManager.enabled:
 		if sessionid:
 			return userManager.findUser(userid=id, session=sessionid)
 		else:
@@ -112,8 +112,8 @@ def load_user(id):
 #~~ startup code
 
 
-class Server():
-	def __init__(self, configfile=None, basedir=None, host="0.0.0.0", port=5000, debug=False, allowRoot=False, logConf=None):
+class Server(object):
+	def __init__(self, configfile=None, basedir=None, host="0.0.0.0", port=5000, debug=False, allowRoot=False, logConf=None, octoprint_daemon=None):
 		self._configfile = configfile
 		self._basedir = basedir
 		self._host = host
@@ -122,6 +122,7 @@ class Server():
 		self._allowRoot = allowRoot
 		self._logConf = logConf
 		self._server = None
+		self._octoprint_daemon = octoprint_daemon
 
 		self._logger = None
 
@@ -283,7 +284,7 @@ class Server():
 		self._setup_assets()
 
 		# configure timelapse
-		octoprint.timelapse.configureTimelapse()
+		octoprint.timelapse.configure_timelapse()
 
 		# setup command triggers
 		events.CommandTrigger(printer)
@@ -291,13 +292,15 @@ class Server():
 			events.DebugEventListener()
 
 		# setup access control
-		if s.getBoolean(["accessControl", "enabled"]):
-			userManagerName = s.get(["accessControl", "userManager"])
-			try:
-				clazz = octoprint.util.get_class(userManagerName)
-				userManager = clazz()
-			except AttributeError, e:
-				self._logger.exception("Could not instantiate user manager %s, will run with accessControl disabled!" % userManagerName)
+		userManagerName = s.get(["accessControl", "userManager"])
+		try:
+			clazz = octoprint.util.get_class(userManagerName)
+			userManager = clazz()
+		except AttributeError as e:
+			self._logger.exception("Could not instantiate user manager {}, falling back to FilebasedUserManager!".format(userManagerName))
+			userManager = octoprint.users.FilebasedUserManager()
+		finally:
+			userManager.enabled = s.getBoolean(["accessControl", "enabled"])
 
 		app.wsgi_app = util.ReverseProxied(
 			app.wsgi_app,
@@ -309,10 +312,19 @@ class Server():
 			s.get(["server", "reverseProxy", "hostFallback"])
 		)
 
+		secret_key = s.get(["server", "secretKey"])
+		if not secret_key:
+			import string
+			from random import choice
+			chars = string.ascii_lowercase + string.ascii_uppercase + string.digits
+			secret_key = "".join(choice(chars) for _ in xrange(32))
+			s.set(["server", "secretKey"], secret_key)
+			s.save()
+		app.secret_key = secret_key
 		loginManager = LoginManager()
 		loginManager.session_protection = "strong"
 		loginManager.user_callback = load_user
-		if userManager is None:
+		if not userManager.enabled:
 			loginManager.anonymous_user = users.DummyUser
 			principals.identity_loaders.appendleft(users.dummy_identity_loader)
 		loginManager.init_app(app)
@@ -321,6 +333,8 @@ class Server():
 			self._host = s.get(["server", "host"])
 		if self._port is None:
 			self._port = s.getInt(["server", "port"])
+
+		app.debug = self._debug
 
 		# register API blueprint
 		self._setup_blueprints()
@@ -377,7 +391,7 @@ class Server():
 
 		server_routes = self._router.urls + [
 			# various downloads
-			(r"/downloads/timelapse/([^/]*\.mpg)", util.tornado.LargeResponseHandler, joined_dict(dict(path=s.getBaseFolder("timelapse")), download_handler_kwargs, no_hidden_files_validator)),
+			(r"/downloads/timelapse/([^/]*\.mp[g4])", util.tornado.LargeResponseHandler, joined_dict(dict(path=s.getBaseFolder("timelapse")), download_handler_kwargs, no_hidden_files_validator)),
 			(r"/downloads/files/local/(.*)", util.tornado.LargeResponseHandler, joined_dict(dict(path=s.getBaseFolder("uploads")), download_handler_kwargs, no_hidden_files_validator, additional_mime_types)),
 			(r"/downloads/logs/([^/]*)", util.tornado.LargeResponseHandler, joined_dict(dict(path=s.getBaseFolder("logs")), download_handler_kwargs, admin_validator)),
 			# camera snapshot
@@ -511,6 +525,11 @@ class Server():
 			observer.join()
 			octoprint.plugin.call_plugin(octoprint.plugin.ShutdownPlugin,
 			                             "on_shutdown")
+
+			if self._octoprint_daemon is not None:
+				self._logger.info("Cleaning up daemon pidfile")
+				self._octoprint_daemon.terminated()
+
 			self._logger.info("Goodbye!")
 		atexit.register(on_shutdown)
 
@@ -544,7 +563,7 @@ class Server():
 		if "l10n" in request.values:
 			return Locale.negotiate([request.values["l10n"]], LANGUAGES)
 
-		if hasattr(g, "identity") and g.identity and userManager is not None:
+		if hasattr(g, "identity") and g.identity and userManager.enabled:
 			userid = g.identity.id
 			try:
 				user_language = userManager.getUserSetting(userid, ("interface", "language"))
@@ -649,17 +668,8 @@ class Server():
 			response.headers.add("X-Clacks-Overhead", "GNU Terry Pratchett")
 			return response
 
-		secret_key = settings().get(["server", "secretKey"])
-		if not secret_key:
-			import string
-			from random import choice
-			chars = string.ascii_lowercase + string.ascii_uppercase + string.digits
-			secret_key = "".join(choice(chars) for _ in xrange(32))
-			settings().set(["server", "secretKey"], secret_key)
-			settings().save()
-		app.secret_key = secret_key
-
-		app.debug = self._debug
+		from octoprint.util.jinja import MarkdownFilter
+		MarkdownFilter(app)
 
 	def _setup_i18n(self, app):
 		global babel
@@ -688,7 +698,56 @@ class Server():
 			return self._get_locale()
 
 	def _setup_jinja2(self):
+		import re
+
 		app.jinja_env.add_extension("jinja2.ext.do")
+		app.jinja_env.add_extension("octoprint.util.jinja.trycatch")
+
+		def regex_replace(s, find, replace):
+			return re.sub(find, replace, s)
+
+		html_header_regex = re.compile("<h(?P<number>[1-6])>(?P<content>.*?)</h(?P=number)>")
+		def offset_html_headers(s, offset):
+			def repl(match):
+				number = int(match.group("number"))
+				number += offset
+				if number > 6:
+					number = 6
+				elif number < 1:
+					number = 1
+				return "<h{number}>{content}</h{number}>".format(number=number, content=match.group("content"))
+			return html_header_regex.sub(repl, s)
+
+		markdown_header_regex = re.compile("^(?P<hashs>#+)\s+(?P<content>.*)$", flags=re.MULTILINE)
+		def offset_markdown_headers(s, offset):
+			def repl(match):
+				number = len(match.group("hashs"))
+				number += offset
+				if number > 6:
+					number = 6
+				elif number < 1:
+					number = 1
+				return "{hashs} {content}".format(hashs="#" * number, content=match.group("content"))
+			return markdown_header_regex.sub(repl, s)
+
+		html_link_regex = re.compile("<(?P<tag>a.*?)>(?P<content>.*?)</a>")
+		def externalize_links(text):
+			def repl(match):
+				tag = match.group("tag")
+				if not u"href" in tag:
+					return match.group(0)
+
+				if not u"target=" in tag and not u"rel=" in tag:
+					tag += u" target=\"_blank\" rel=\"noreferrer noopener\""
+
+				content = match.group("content")
+				return u"<{tag}>{content}</a>".format(tag=tag, content=content)
+			return html_link_regex.sub(repl, text)
+
+		app.jinja_env.filters["regex_replace"] = regex_replace
+		app.jinja_env.filters["offset_html_headers"] = offset_html_headers
+		app.jinja_env.filters["offset_markdown_headers"] = offset_markdown_headers
+		app.jinja_env.filters["externalize_links"] = externalize_links
 
 		# configure additional template folders for jinja2
 		import jinja2
@@ -697,12 +756,37 @@ class Server():
 		                                                                  path_filter=lambda x: not octoprint.util.is_hidden_path(x))
 		filesystem_loader.searchpath = self._template_searchpaths
 
-		jinja_loader = jinja2.ChoiceLoader([
-			app.jinja_loader,
-			filesystem_loader
-		])
+		loaders = [app.jinja_loader, filesystem_loader]
+		if octoprint.util.is_running_from_source():
+			root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+			allowed = ["AUTHORS.md", "CHANGELOG.md", "SUPPORTERS.md", "THIRDPARTYLICENSES.md"]
+
+			class SourceRootFilesystemLoader(jinja2.FileSystemLoader):
+				def __init__(self, template_filter, prefix, *args, **kwargs):
+					jinja2.FileSystemLoader.__init__(self, *args, **kwargs)
+					self._filter = template_filter
+					if not prefix.endswith("/"):
+						prefix += "/"
+					self._prefix = prefix
+
+				def get_source(self, environment, template):
+					if not template.startswith(self._prefix):
+						raise jinja2.TemplateNotFound(template)
+
+					template = template[len(self._prefix):]
+					if not self._filter(template):
+						raise jinja2.TemplateNotFound(template)
+
+					return jinja2.FileSystemLoader.get_source(self, environment, template)
+
+				def list_templates(self):
+					templates = jinja2.FileSystemLoader.list_templates(self)
+					return map(lambda t: self._prefix + t, filter(self._filter, templates))
+
+			loaders.append(SourceRootFilesystemLoader(lambda t: t in allowed, "_data/", root))
+
+		jinja_loader = jinja2.ChoiceLoader(loaders)
 		app.jinja_loader = jinja_loader
-		del jinja2
 
 		self._register_template_plugins()
 
@@ -715,10 +799,25 @@ class Server():
 		preemptive_cache_timeout = settings().getInt(["server", "preemptiveCache", "until"])
 		cutoff_timestamp = time.time() - preemptive_cache_timeout * 24 * 60 * 60
 
-		def filter_old_entries(entry):
+		def filter_current_entries(entry):
+			"""Returns True for entries younger than the cutoff date"""
 			return "_timestamp" in entry and entry["_timestamp"] > cutoff_timestamp
 
-		cache_data = preemptive_cache.clean_all_data(lambda root, entries: filter(filter_old_entries, entries))
+		def filter_http_entries(entry):
+			"""Returns True for entries targeting http or https."""
+			return "base_url" in entry \
+			       and entry["base_url"] \
+			       and (entry["base_url"].startswith("http://")
+			            or entry["base_url"].startswith("https://"))
+
+		def filter_entries(entry):
+			"""Combined filter."""
+			filters = (filter_current_entries,
+			           filter_http_entries)
+			return all([f(entry) for f in filters])
+
+		# filter out all old and non-http entries
+		cache_data = preemptive_cache.clean_all_data(lambda root, entries: filter(filter_entries, entries))
 		if not cache_data:
 			return
 
@@ -730,17 +829,23 @@ class Server():
 					additional_request_data = kwargs.get("_additional_request_data", dict())
 					kwargs = dict((k, v) for k, v in kwargs.items() if not k.startswith("_") and not k == "plugin")
 					kwargs.update(additional_request_data)
+
 					try:
 						if plugin:
 							self._logger.info("Preemptively caching {} (plugin {}) for {!r}".format(route, plugin, kwargs))
 						else:
 							self._logger.info("Preemptively caching {} for {!r}".format(route, kwargs))
+
+						headers = kwargs.get("headers", dict())
+						headers["X-Preemptive-Record"] = "no"
+						kwargs["headers"] = headers
+
 						builder = EnvironBuilder(**kwargs)
-						with preemptive_cache.disable_access_logging():
-							app(builder.get_environ(), lambda *a, **kw: None)
+						app(builder.get_environ(), lambda *a, **kw: None)
 					except:
 						self._logger.exception("Error while trying to preemptively cache {} for {!r}".format(route, kwargs))
 
+		# asynchronous caching
 		import threading
 		cache_thread = threading.Thread(target=execute_caching, name="Preemptive Cache Worker")
 		cache_thread.daemon = True
@@ -930,7 +1035,7 @@ class Server():
 			"js/lib/modernizr.custom.js",
 			"js/lib/lodash.min.js",
 			"js/lib/sprintf.min.js",
-			"js/lib/knockout.js",
+			"js/lib/knockout-3.4.0.js",
 			"js/lib/knockout.mapping-latest.js",
 			"js/lib/babel.js",
 			"js/lib/avltree.js",

@@ -140,7 +140,7 @@ def get_user_for_apikey(apikey):
 		if apikey == settings().get(["api", "key"]) or octoprint.server.appSessionManager.validate(apikey):
 			# master key or an app session key was used
 			return ApiUser()
-		elif octoprint.server.userManager is not None:
+		elif octoprint.server.userManager.enabled:
 			# user key might have been used
 			return octoprint.server.userManager.findUser(apikey=apikey)
 	return None
@@ -245,6 +245,11 @@ class ReverseProxied(object):
 
 		# determine scheme
 		scheme = environ.get(self._header_scheme, "")
+		if scheme and "," in scheme:
+			# Scheme might be something like "https,https" if doubly-reverse-proxied
+			# without stripping original scheme header first, make sure to only use
+			# the first entry in such a case. See #1391.
+			scheme, _ = map(lambda x: x.strip(), scheme.split(",", 1))
 		if not scheme:
 			scheme = self._fallback_scheme
 

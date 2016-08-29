@@ -222,7 +222,7 @@ def fix_webassets_filtertool():
 #~~ passive login helper
 
 def passive_login():
-	if octoprint.server.userManager is not None:
+	if octoprint.server.userManager.enabled:
 		user = octoprint.server.userManager.login_user(flask.ext.login.current_user)
 	else:
 		user = flask.ext.login.current_user
@@ -312,6 +312,18 @@ class LessSimpleCache(BaseCache):
 			return False
 		return len(self._cache) > self._threshold
 
+	def __getitem__(self, key):
+		return self.get(key)
+
+	def __setitem__(self, key, value):
+		return self.set(key, value)
+
+	def __delitem__(self, key):
+		return self.delete(key)
+
+	def __contains__(self, key):
+		return key in self._cache
+
 _cache = LessSimpleCache()
 
 def cached(timeout=5 * 60, key=lambda: "view:{}".format(flask.request.path), unless=None, refreshif=None, unless_response=None):
@@ -358,6 +370,11 @@ def cached(timeout=5 * 60, key=lambda: "view:{}".format(flask.request.path), unl
 
 	return decorator
 
+def is_in_cache(key=lambda: "view:%s" % flask.request.path):
+	if callable(key):
+		key = key()
+	return key in _cache
+
 def cache_check_headers():
 	return "no-cache" in flask.request.cache_control or "no-cache" in flask.request.pragma
 
@@ -386,9 +403,8 @@ class PreemptiveCache(object):
 
 		self._lock = threading.RLock()
 		self._logger = logging.getLogger(__name__ + "." + self.__class__.__name__)
-		self._log_access = True
 
-	def record(self, data, unless=None):
+	def record(self, data, unless=None, root=None):
 		if callable(unless) and unless():
 			return
 
@@ -397,15 +413,28 @@ class PreemptiveCache(object):
 			entry_data = entry_data()
 
 		if entry_data is not None:
-			from flask import request
-			self.add_data(request.path, entry_data)
+			if root is None:
+				from flask import request
+				root = request.path
+			self.add_data(root, entry_data)
 
-	@contextlib.contextmanager
-	def disable_access_logging(self):
-		with self._lock:
-			self._log_access = False
-			yield
-			self._log_access = True
+	def has_record(self, data, root=None):
+		if callable(data):
+			data = data()
+
+		if data is None:
+			return False
+
+		if root is None:
+			from flask import request
+			root = request.path
+
+		all_data = self.get_data(root)
+		for existing in all_data:
+			if self._compare_data(data, existing):
+				return True
+
+		return False
 
 	def clean_all_data(self, cleanup_function):
 		assert callable(cleanup_function)
@@ -420,7 +449,7 @@ class PreemptiveCache(object):
 					self._logger.debug("Removed root {} from preemptive cache".format(root))
 				elif len(entries) < old_count:
 					all_data[root] = entries
-					self._logger.debug("Removed {} from preemptive cache for root {}".format(old_count - len(entries), root))
+					self._logger.debug("Removed {} entries from preemptive cache for root {}".format(old_count - len(entries), root))
 			self.set_all_data(all_data)
 
 		return all_data
@@ -467,20 +496,12 @@ class PreemptiveCache(object):
 			self.set_all_data(all_data)
 
 	def add_data(self, root, data):
-		from octoprint.util import dict_filter
-
-		def strip_ignored(d):
-			return dict_filter(d, lambda k, v: not k.startswith("_"))
-
-		def compare(a, b):
-			return set(strip_ignored(a).items()) == set(strip_ignored(b).items())
-
 		def split_matched_and_unmatched(entry, entries):
 			matched = []
 			unmatched = []
 
 			for e in entries:
-				if compare(e, entry):
+				if self._compare_data(e, entry):
 					matched.append(e)
 				else:
 					unmatched.append(e)
@@ -509,14 +530,20 @@ class PreemptiveCache(object):
 				to_persist["_timestamp"] = time.time()
 				to_persist["_count"] = 1
 				self._logger.info("Adding entry for {} and {!r}".format(root, to_persist))
-			elif self._log_access:
+			else:
 				to_persist["_timestamp"] = time.time()
 				to_persist["_count"] = to_persist.get("_count", 0) + 1
 				self._logger.debug("Updating timestamp and counter for {} and {!r}".format(root, data))
-			else:
-				self._logger.debug("Not updating timestamp and counter for {} and {!r}, currently flagged as disabled".format(root, data))
 
 			self.set_data(root, [to_persist] + other)
+
+	def _compare_data(self, a, b):
+		from octoprint.util import dict_filter
+
+		def strip_ignored(d):
+			return dict_filter(d, lambda k, v: not k.startswith("_"))
+
+		return set(strip_ignored(a).items()) == set(strip_ignored(b).items())
 
 
 def preemptively_cached(cache, data, unless=None):
@@ -727,7 +754,7 @@ def restricted_access(func):
 	@functools.wraps(func)
 	def decorated_view(*args, **kwargs):
 		# if OctoPrint hasn't been set up yet, abort
-		if settings().getBoolean(["server", "firstRun"]) and (octoprint.server.userManager is None or not octoprint.server.userManager.hasBeenCustomized()):
+		if settings().getBoolean(["server", "firstRun"]) and settings().getBoolean(["accessControl", "enabled"]) and (octoprint.server.userManager is None or not octoprint.server.userManager.hasBeenCustomized()):
 			return flask.make_response("OctoPrint isn't setup yet", 403)
 
 		apikey = octoprint.server.util.get_api_key(flask.request)
@@ -934,7 +961,8 @@ def collect_plugin_assets(enable_gcodeviewer=True, preferred_stylesheet="css"):
 		'js/app/viewmodels/timelapse.js',
 		'js/app/viewmodels/users.js',
 		'js/app/viewmodels/log.js',
-		'js/app/viewmodels/usersettings.js'
+		'js/app/viewmodels/usersettings.js',
+		'js/app/viewmodels/about.js'
 	]
 	if enable_gcodeviewer:
 		assets["js"] += [

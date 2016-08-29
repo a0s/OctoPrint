@@ -214,7 +214,7 @@ class PrinterInterface(object):
 		"""
 		raise NotImplementedError()
 
-	def select_file(self, path, sd, printAfterSelect=False):
+	def select_file(self, path, sd, printAfterSelect=False, pos=None):
 		"""
 		Selects the specified ``path`` for printing, specifying if the file is to be found on the ``sd`` or not.
 		Optionally can also directly start the print after selecting the file.
@@ -236,11 +236,26 @@ class PrinterInterface(object):
 		"""
 		raise NotImplementedError()
 
+	def pause_print(self):
+		"""
+		Pauses the current print job if it is currently running, does nothing otherwise.
+		"""
+		raise NotImplementedError()
+
+	def resume_print(self):
+		"""
+		Resumes the current print job if it is currently paused, does nothing otherwise.
+		"""
+		raise NotImplementedError()
+
 	def toggle_pause_print(self):
 		"""
 		Pauses the current print job if it is currently running or resumes it if it is currently paused.
 		"""
-		raise NotImplementedError()
+		if self.is_printing():
+			self.pause_print()
+		elif self.is_paused():
+			self.resume_print()
 
 	def cancel_print(self):
 		"""

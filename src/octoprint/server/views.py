@@ -6,9 +6,10 @@ __license__ = 'GNU Affero General Public License http://www.gnu.org/licenses/agp
 __copyright__ = "Copyright (C) 2015 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
 import os
+import datetime
 
 from collections import defaultdict
-from flask import request, g, url_for, make_response, render_template, send_from_directory, redirect
+from flask import request, g, url_for, make_response, render_template, send_from_directory, redirect, abort
 
 import octoprint.plugin
 
@@ -16,8 +17,10 @@ from octoprint.server import app, userManager, pluginManager, gettext, \
 	debug, LOCALES, VERSION, DISPLAY_VERSION, UI_API_KEY, BRANCH, preemptiveCache, \
 	NOT_MODIFIED
 from octoprint.settings import settings
+from octoprint.filemanager import get_all_extensions
 
 import re
+import base64
 
 from . import util
 
@@ -27,14 +30,65 @@ _logger = logging.getLogger(__name__)
 _valid_id_re = re.compile("[a-z_]+")
 _valid_div_re = re.compile("[a-zA-Z_-]+")
 
+def _preemptive_unless(base_url=None):
+	if base_url is None:
+		base_url = request.url_root
+
+	cache_disabled = not settings().getBoolean(["devel", "cache", "preemptive"]) \
+	                 or base_url in settings().get(["server", "preemptiveCache", "exceptions"]) \
+	                 or not (base_url.startswith("http://") or base_url.startswith("https://"))
+
+	recording_disabled = request.headers.get("X-Preemptive-Record", "yes") == "no"
+
+	return cache_disabled or recording_disabled
+
+def _preemptive_data(path=None, base_url=None):
+	if path is None:
+		path = request.path
+	if base_url is None:
+		base_url = request.url_root
+
+	return dict(path=path,
+	            base_url=base_url,
+	            query_string="l10n={}".format(g.locale.language) if g.locale else "en")
+
+def _cache_key(url=None, locale=None):
+	if url is None:
+		url = request.base_url
+	if locale is None:
+		locale = g.locale.language if g.locale else "en"
+
+	return "view:{}:{}".format(url, locale)
+
+@app.route("/cached.gif")
+def in_cache():
+	url = request.base_url.replace("/cached.gif", "/")
+	path = request.path.replace("/cached.gif", "/")
+
+	key = _cache_key(url)
+	data = _preemptive_data(path=path)
+
+	response = make_response(bytes(base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")))
+	response.headers["Content-Type"] = "image/gif"
+
+	if _preemptive_unless(base_url=url) or not preemptiveCache.has_record(data, root=path):
+		_logger.info("Preemptive cache not active for path {} and data {!r}, signaling as cached".format(path, data))
+		return response
+	elif util.flask.is_in_cache(key):
+		_logger.info("Found path {} in cache (key: {}), signaling as cached".format(path, key))
+		return response
+	else:
+		_logger.debug("Path {} not yet cached (key: {}), signaling as missing".format(path, key))
+		return abort(404)
+
 @app.route("/")
 @util.flask.preemptively_cached(cache=preemptiveCache,
-                                data=lambda: dict(path=request.path, base_url=request.url_root, query_string="l10n={}".format(g.locale.language)) if g.locale else "en",
-                                unless=lambda: request.url_root in settings().get(["server", "preemptiveCache", "exceptions"]))
+                                data=_preemptive_data,
+                                unless=_preemptive_unless)
 @util.flask.conditional(lambda: _check_etag_and_lastmodified_for_index(), NOT_MODIFIED)
 @util.flask.cached(timeout=-1,
-                   refreshif=lambda cached: util.flask.check_for_refresh(cached, _compute_etag_for_index()),
-                   key=lambda: "view:{}:{}".format(request.base_url, g.locale.language if g.locale else "en"),
+                   refreshif=lambda cached: _validate_cache_for_index(cached),
+                   key=_cache_key,
                    unless_response=lambda response: util.flask.cache_check_response_headers(response))
 @util.flask.etagged(lambda _: _compute_etag_for_index())
 @util.flask.lastmodified(lambda _: _compute_date_for_index())
@@ -43,8 +97,8 @@ def index():
 
 	enable_gcodeviewer = settings().getBoolean(["gcodeViewer", "enabled"])
 	enable_timelapse = (settings().get(["webcam", "snapshot"]) and settings().get(["webcam", "ffmpeg"]))
-	enable_systemmenu = settings().get(["system"]) is not None and settings().get(["system", "actions"]) is not None and len(settings().get(["system", "actions"])) > 0
-	enable_accesscontrol = userManager is not None
+	enable_systemmenu = settings().get(["system"]) is not None and settings().get(["system", "actions"]) is not None
+	enable_accesscontrol = userManager.enabled
 	preferred_stylesheet = settings().get(["devel", "stylesheet"])
 	locales = dict((l.language, dict(language=l.language, display=l.display_name, english=l.english_name)) for l in LOCALES)
 
@@ -59,6 +113,7 @@ def index():
 		tab=dict(div=lambda x: "tab_plugin_" + x, template=lambda x: x + "_tab.jinja2", to_entry=lambda data: (data["name"], data)),
 		settings=dict(div=lambda x: "settings_plugin_" + x, template=lambda x: x + "_settings.jinja2", to_entry=lambda data: (data["name"], data)),
 		usersettings=dict(div=lambda x: "usersettings_plugin_" + x, template=lambda x: x + "_usersettings.jinja2", to_entry=lambda data: (data["name"], data)),
+		about=dict(div=lambda x: "about_plugin_" + x, template=lambda x: x + "_about.jinja2", to_entry=lambda data: (data["name"], data)),
 		generic=dict(template=lambda x: x + ".jinja2", to_entry=lambda data: data)
 	)
 
@@ -69,6 +124,7 @@ def index():
 		tab=dict(add="append", key="name"),
 		settings=dict(add="custom_append", key="name", custom_add_entries=lambda missing: dict(section_plugins=(gettext("Plugins"), None)), custom_add_order=lambda missing: ["section_plugins"] + missing),
 		usersettings=dict(add="append", key="name"),
+		about=dict(add="append", key="name"),
 		generic=dict(add="append", key=None)
 	)
 
@@ -124,7 +180,7 @@ def index():
 	# sidebar
 
 	templates["sidebar"]["entries"]= dict(
-		connection=(gettext("Connection"), dict(template="sidebar/connection.jinja2", _div="connection", icon="signal", styles_wrapper=["display: none"], data_bind="visible: loginState.isAdmin")),
+		connection=(gettext("Connection"), dict(template="sidebar/connection.jinja2", _div="connection", icon="signal", styles_wrapper=["display: none"], data_bind="visible: loginState.isUser")),
 		state=(gettext("State"), dict(template="sidebar/state.jinja2", _div="state", icon="info-sign")),
 		files=(gettext("Files"), dict(template="sidebar/files.jinja2", _div="files", icon="list", classes_content=["overflow_visible"], template_header="sidebar/files_header.jinja2"))
 	)
@@ -175,6 +231,17 @@ def index():
 			access=(gettext("Access"), dict(template="dialogs/usersettings/access.jinja2", _div="usersettings_access", custom_bindings=False)),
 			interface=(gettext("Interface"), dict(template="dialogs/usersettings/interface.jinja2", _div="usersettings_interface", custom_bindings=False)),
 		)
+
+	# about dialog
+
+	templates["about"]["entries"] = dict(
+		about=("About OctoPrint", dict(template="dialogs/about/about.jinja2", _div="about_about", custom_bindings=False)),
+		license=("OctoPrint License", dict(template="dialogs/about/license.jinja2", _div="about_license", custom_bindings=False)),
+		thirdparty=("Third Party Licenses", dict(template="dialogs/about/thirdparty.jinja2", _div="about_thirdparty", custom_bindings=False)),
+		authors=("Authors", dict(template="dialogs/about/authors.jinja2", _div="about_authors", custom_bindings=False)),
+		changelog=("Changelog", dict(template="dialogs/about/changelog.jinja2", _div="about_changelog", custom_bindings=False)),
+		supporters=("Supporters", dict(template="dialogs/about/supporters.jinja2", _div="about_sponsors", custom_bindings=False))
+	)
 
 	# extract data from template plugins
 
@@ -281,11 +348,12 @@ def index():
 
 	#~~ prepare full set of template vars for rendering
 
-	first_run = settings().getBoolean(["server", "firstRun"]) and (userManager is None or not userManager.hasBeenCustomized())
+	now = datetime.datetime.utcnow()
+	first_run = settings().getBoolean(["server", "firstRun"]) and userManager.enabled and not userManager.hasBeenCustomized()
 	render_kwargs = dict(
 		webcamStream=settings().get(["webcam", "stream"]),
 		enableTemperatureGraph=settings().get(["feature", "temperatureGraph"]),
-		enableAccessControl=userManager is not None,
+		enableAccessControl=userManager.enabled,
 		enableSdSupport=settings().get(["feature", "sdSupport"]),
 		firstRun=first_run,
 		debug=debug,
@@ -297,7 +365,9 @@ def index():
 		uiApiKey=UI_API_KEY,
 		templates=templates,
 		pluginNames=plugin_names,
-		locales=locales
+		locales=locales,
+		now=now,
+		supportedExtensions=map(lambda ext: ".{}".format(ext), get_all_extensions())
 	)
 	render_kwargs.update(plugin_vars)
 
@@ -512,7 +582,7 @@ def _files_for_index():
 
 def _compute_date(files):
 	from datetime import datetime
-	timestamps = map(lambda path: os.stat(path).st_mtime, files)
+	timestamps = map(lambda path: os.stat(path).st_mtime, files) + [0] if files else []
 	max_timestamp = max(*timestamps) if timestamps else None
 	if max_timestamp:
 		# we set the micros to 0 since microseconds are not speced for HTTP

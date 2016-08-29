@@ -10,7 +10,7 @@ $(function() {
 
         self.ui_progress_percentage = ko.observable();
         self.ui_progress_type = ko.observable();
-        self.ui_progress_text = ko.computed(function() {
+        self.ui_progress_text = ko.pureComputed(function() {
             var text = "";
             switch (self.ui_progress_type()) {
                 case "loading": {
@@ -235,7 +235,7 @@ $(function() {
             self._configureLayerCommandSlider(commandSliderElement);
 
             self.settings.requestData(function() {
-                GCODE.ui.init({
+                var initResult = GCODE.ui.init({
                     container: "#gcode_canvas",
                     onProgress: self._onProgress,
                     onModelLoaded: self._onModelLoaded,
@@ -244,6 +244,12 @@ $(function() {
                     toolOffsets: self._retrieveToolOffsets(),
                     invertAxes: self._retrieveAxesConfiguration()
                 });
+
+                if (!initResult) {
+                    log.info("Could not initialize GCODE viewer component");
+                    return;
+                }
+
                 self.synchronizeOptions();
                 self.enabled = true;
             });
@@ -429,6 +435,7 @@ $(function() {
             } else {
                 var output = [];
                 output.push(gettext("Model size") + ": " + model.width.toFixed(2) + "mm &times; " + model.depth.toFixed(2) + "mm &times; " + model.height.toFixed(2) + "mm");
+                output.push(gettext("Estimated total print time") + ": " + formatFuzzyPrintTime(model.printTime));
                 output.push(gettext("Estimated layer height") + ": " + model.layerHeight.toFixed(2) + gettext("mm"));
                 output.push(gettext("Layer count") + ": " + model.layersPrinted.toFixed(0) + " " + gettext("printed") + ", " + model.layersTotal.toFixed(0) + " " + gettext("visited"));
 
@@ -465,7 +472,7 @@ $(function() {
                         }
                     }
                 }
-                output.push(gettext("Print time for layer") + ": " + formatDuration(layer.printTime));
+                output.push(gettext("Print time for layer") + ": " + formatFuzzyPrintTime(layer.printTime));
 
                 self.ui_layerInfo(output.join("<br>"));
 
