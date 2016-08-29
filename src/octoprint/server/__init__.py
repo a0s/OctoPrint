@@ -874,6 +874,11 @@ class Server(object):
 		from octoprint.server.apps import apps, clear_registered_app
 		import octoprint.server.views
 
+		for x in (octoprint.server.api, octoprint.server.apps):
+			rel = getattr(x, "register_event_listeners", None)
+			if rel is not None and callable(rel):
+				rel()
+
 		app.register_blueprint(api, url_prefix="/api")
 		app.register_blueprint(apps, url_prefix="/apps")
 

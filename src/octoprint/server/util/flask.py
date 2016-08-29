@@ -300,6 +300,12 @@ class LessSimpleCache(BaseCache):
 	def delete(self, key):
 		self._cache.pop(key, None)
 
+	def delete_all(self, matcher):
+		keys = [key for key in self._cache if matcher(key)]
+		for key in keys:
+			self.delete(key)
+		return keys
+
 	def calculate_timeout(self, timeout=None):
 		if timeout is None:
 			timeout = self.default_timeout
@@ -369,6 +375,34 @@ def cached(timeout=5 * 60, key=lambda: "view:{}".format(flask.request.path), unl
 		return decorated_function
 
 	return decorator
+
+def cache_invalidated(key=lambda: "view:{}".format(flask.request.path)):
+	def decorator(f):
+		@functools.wraps(f)
+		def decorated_function(*args, **kwargs):
+			invalidate_cache(key=key)
+			logging.getLogger(__name__).debug("Invalidated cache entry for key {}".format(key))
+			return f(*args, **kwargs)
+		return decorated_function
+	return decorator
+
+def cache_all_invalidated(matcher):
+	def decorator(f):
+		@functools.wraps(f)
+		def decorated_function(*args, **kwargs):
+			keys = invalidate_all_keys_matching(matcher)
+			logging.getLogger(__name__).debug("Invalidated cache entry for keys {}".format(keys))
+			return f(*args, **kwargs)
+		return decorated_function
+	return decorator
+
+def invalidate_cache(key=lambda: "view:{}".format(flask.request.path)):
+	if callable(key):
+		key = key()
+	_cache.delete(key)
+
+def invalidate_all_keys_matching(matcher):
+	return _cache.delete_all(matcher)
 
 def is_in_cache(key=lambda: "view:%s" % flask.request.path):
 	if callable(key):
@@ -646,6 +680,11 @@ def add_non_caching_response_headers(response):
 	return response
 
 
+def add_no_browser_caching_response_headers(response):
+	response.headers["Cache-Control"] = "max-age=0"
+	return response
+
+
 def non_caching():
 	def decorator(f):
 		@functools.wraps(f)
@@ -655,6 +694,78 @@ def non_caching():
 		return decorated_function
 	return decorator
 
+
+def no_browser_caching():
+	def decorator(f):
+		@functools.wraps(f)
+		def decorated_function(*args, **kwargs):
+			resp = f(*args, **kwargs)
+			return add_no_browser_caching_response_headers(resp)
+		return decorated_function
+	return decorator
+
+
+def fully_cached(key=None,
+                 etag=lambda lm: None,
+                 lm=lambda: None,
+                 check_conditional=None,
+                 validate_cache=None,
+                 additional_validate_cache=None,
+                 disable_browser_cache=False):
+	if key is None:
+		def key():
+			return "view:{}".format(flask.request.path)
+
+	if check_conditional is None:
+		def check_conditional():
+			l = lm()
+			if not l:
+				return False
+			et = etag(None)
+			return check_etag_and_lastmodified(et, l)
+
+	if validate_cache is None:
+		def validate_cache(cached):
+			no_cache_headers = cache_check_headers()
+			refresh_flag = "_refresh" in flask.request.values
+			etag_different = etag(None) != cached.get_etag()[0]
+
+			additional_invalid = False
+			if additional_validate_cache is not None and callable(additional_validate_cache):
+				additional_invalid = additional_validate_cache()
+
+			return no_cache_headers or refresh_flag or etag_different or additional_invalid
+
+	def decorator(f):
+		@functools.wraps(f)
+		def decorated_function(*args, **kwargs):
+			if check_conditional():
+				return ("Not Modified", 304)
+
+			view = cached(key=key,
+			              timeout=-1,
+			              refreshif=validate_cache,
+			              unless_response=cache_check_response_headers)(f)
+
+			rv = view(*args, **kwargs)
+
+			l = lm()
+			et = etag(l)
+
+			if not isinstance(l, basestring):
+				from werkzeug.http import http_date
+				l = http_date(l)
+			if l:
+				rv.headers["Last-Modified"] = l
+
+			if et:
+				rv.set_etag(et)
+
+			if disable_browser_cache:
+				rv = add_no_browser_caching_response_headers(rv)
+			return rv
+		return decorated_function
+	return decorator
 
 #~~ access validators for use with tornado
 

@@ -12,7 +12,7 @@ from octoprint.server import slicingManager, NOT_MODIFIED
 from octoprint.server.util.flask import restricted_access
 from octoprint.server.api import api, NO_CONTENT
 from octoprint.server.util.flask import etagged, lastmodified, conditional, \
-	check_etag, check_etag_and_lastmodified, non_caching
+	check_etag, check_etag_and_lastmodified, non_caching, no_browser_caching
 
 from octoprint.settings import settings as s, valid_boolean_trues
 
@@ -30,9 +30,11 @@ def compute_etag():
 	hash.update(",".join(sorted(slicers)))
 	return hash.hexdigest()
 
+
 @api.route("/slicing", methods=["GET"])
 @conditional(lambda: check_etag(compute_etag()), NOT_MODIFIED)
 @etagged(lambda _: compute_etag())
+@no_browser_caching()
 def slicingListAll():
 	from octoprint.filemanager import get_extensions
 
@@ -91,6 +93,7 @@ def check_slicer_profiles(slicer):
 @conditional(lambda: check_slicer_profiles(request.view_args["slicer"]), NOT_MODIFIED)
 @etagged(lambda _: compute_etag_for_slicer_profiles(request.view_args["slicer"]))
 @lastmodified(lambda _: compute_lastmodified_for_slicer_profiles(request.view_args["slicer"]))
+@no_browser_caching()
 def slicingListSlicerProfiles(slicer):
 	configured = False
 	if "configured" in request.values and request.values["configured"] in valid_boolean_trues:

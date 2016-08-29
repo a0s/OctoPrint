@@ -20,7 +20,7 @@ import octoprint.plugin
 from octoprint.server import admin_permission, NO_CONTENT
 from octoprint.settings import settings as s, valid_boolean_trues
 from octoprint.server.util import noCachingButGetResponseHandler, apiKeyRequestHandler, corsResponseHandler
-from octoprint.server.util.flask import restricted_access, get_json_command_from_request, passive_login
+from octoprint.server.util.flask import restricted_access, get_json_command_from_request, passive_login, add_no_browser_caching_response_headers
 
 
 #~~ init api blueprint, including sub modules
@@ -43,9 +43,16 @@ from . import languages as api_languages
 VERSION = "0.1"
 
 api.after_request(noCachingButGetResponseHandler)
+api.after_request(add_no_browser_caching_response_headers)
 
 api.before_request(apiKeyRequestHandler)
 api.after_request(corsResponseHandler)
+
+def register_event_listeners():
+	for x in (api_printer, api_job, api_connection, api_files, api_settings, api_timelapse, api_users, api_logs, api_slicing, api_printer_profiles, api_languages):
+		rel = getattr(x, "register_event_listeners", None)
+		if rel is not None and callable(rel):
+			rel()
 
 #~~ data from plugins
 
@@ -171,7 +178,7 @@ def performSystemAction():
 							stderr_text = p.stderr.text
 							logger.warn("Command failed with return code %i: %s" % (returncode, stderr_text))
 							return make_response(("Command failed with return code %i: %s" % (returncode, stderr_text), 500, []))
-				except Exception, e:
+				except Exception as e:
 					if not ignore:
 						logger.warn("Command failed: %s" % e)
 						return make_response(("Command failed: %s" % e, 500, []))

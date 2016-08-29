@@ -10,7 +10,8 @@ from flask import request, jsonify, make_response, url_for
 from octoprint.filemanager.destinations import FileDestinations
 from octoprint.settings import settings, valid_boolean_trues
 from octoprint.server import printer, fileManager, slicingManager, eventManager, NO_CONTENT
-from octoprint.server.util.flask import restricted_access, get_json_command_from_request
+from octoprint.server.util.flask import restricted_access, get_json_command_from_request, \
+	invalidate_all_keys_matching, cache_check_headers, check_etag_and_lastmodified, fully_cached
 from octoprint.server.api import api
 from octoprint.events import Events
 import octoprint.filemanager
@@ -22,18 +23,76 @@ import psutil
 
 #~~ GCODE file handling
 
+def register_event_listeners():
+	def updated_files(event, payload):
+		if payload.get("type", None) == "printables":
+			invalidate_all_keys_matching(lambda key: key.endswith("/files") or
+			                                         key.endswith("/files/{}".format(FileDestinations.LOCAL)) or
+			                                         key.endswith("/files/{}".format(FileDestinations.SDCARD)))
 
-# Now, why isn't the GET request for the files cached? Thought long and hard
-# about this and the problem is really that stuff can change externally (there
-# are users who modify and add to the files in the upload folder externally
-# from OctoPrint), so in order to be able to reliably validate any cache we'd need
-# to collect all our file information on every request anyhow. That collection
-# step is pretty much the largest part of the work that needs to be done for
-# this API endpoint, so there would not be much point in caching if to validate
-# the cache the request would have to be processed anyhow.
+	def metadata_updated(event, payload):
+		# Currently we only support metadata analysis on local storage
+		invalidate_all_keys_matching(lambda key: key.endswith("/files") or
+		                                         key.endswith("/files/{}".format(FileDestinations.LOCAL)))
+
+	eventManager.subscribe(Events.UPDATED_FILES, updated_files)
+	eventManager.subscribe(Events.METADATA_STATISTICS_UPDATED, metadata_updated)
+	eventManager.subscribe(Events.METADATA_ANALYSIS_FINISHED, metadata_updated)
+
+def _validate_cache(cached, path):
+	no_cache_headers = cache_check_headers()
+	refresh_flag = "_refresh" in request.values
+	etag_different = compute_etag(path) != cached.get_etag()[0]
+
+	return no_cache_headers or refresh_flag or etag_different
+
+def compute_etag(path, lm=None):
+	if lm is None:
+		lm = compute_lastmodified(path)
+
+	import hashlib
+	hash = hashlib.sha1()
+	hash.update(str(lm) if lm else "")
+	return hash.hexdigest()
+
+
+def compute_lastmodified(path):
+	if path == "/api/files":
+		lm = [0]
+		for storage in fileManager.registered_storages:
+			lm.append(fileManager.last_modified(storage))
+
+		if filter(lambda x: x is None, lm):
+			return None
+
+		return max(lm)
+
+	elif path == "/api/files/{}".format(FileDestinations.LOCAL):
+		return fileManager.last_modified(FileDestinations.LOCAL)
+
+	elif path == "/api/files/{}".format(FileDestinations.SDCARD):
+		# return last modified from printer instance, if available, else None
+		return None
+
+	else:
+		return None
+
+
+def check_conditional(path):
+	lm = compute_lastmodified(path)
+	if not lm:
+		return False
+
+	etag = compute_etag(path, lm=lm)
+	return check_etag_and_lastmodified(etag, lm)
+
 
 @api.route("/files", methods=["GET"])
-@octoprint.server.util.flask.non_caching()
+@fully_cached(key=lambda: "view:{}".format(request.base_url),
+              etag=lambda l: compute_etag(request.path, lm=l),
+              lm=lambda: compute_lastmodified(request.path),
+              additional_validate_cache=lambda: request.values.get("force", "false") in valid_boolean_trues,
+              check_conditional=lambda: check_conditional(request.path))
 def readGcodeFiles():
 	filter = None
 	if "filter" in request.values:
@@ -45,7 +104,11 @@ def readGcodeFiles():
 
 
 @api.route("/files/<string:origin>", methods=["GET"])
-@octoprint.server.util.flask.non_caching()
+@fully_cached(key=lambda: "view:{}".format(request.base_url),
+              etag=lambda l: compute_etag(request.path, lm=l),
+              lm=lambda: compute_lastmodified(request.path),
+              additional_validate_cache=lambda: request.values.get("force", "false") in valid_boolean_trues,
+              check_conditional=lambda: check_conditional(request.path))
 def readGcodeFilesForOrigin(origin):
 	if origin not in [FileDestinations.LOCAL, FileDestinations.SDCARD]:
 		return make_response("Unknown origin: %s" % origin, 404)

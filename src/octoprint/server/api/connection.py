@@ -12,7 +12,7 @@ from octoprint.printer import get_connection_options
 from octoprint.server import printer, printerProfileManager, NO_CONTENT, NOT_MODIFIED
 from octoprint.server.api import api
 from octoprint.server.util.flask import restricted_access, get_json_command_from_request, \
-	etagged, lastmodified, conditional, check_etag_and_lastmodified
+	etagged, lastmodified, conditional, check_etag_and_lastmodified, no_browser_caching
 import octoprint.util as util
 
 
@@ -50,6 +50,7 @@ def check_conditional():
 @conditional(lambda: check_conditional(), NOT_MODIFIED)
 @etagged(lambda _: compute_etag())
 @lastmodified(lambda _: compute_lastmodified())
+@no_browser_caching()
 def connectionState():
 	state, port, baudrate, printer_profile = printer.get_current_connection()
 	current = {

@@ -85,13 +85,11 @@ def in_cache():
 @util.flask.preemptively_cached(cache=preemptiveCache,
                                 data=_preemptive_data,
                                 unless=_preemptive_unless)
-@util.flask.conditional(lambda: _check_etag_and_lastmodified_for_index(), NOT_MODIFIED)
-@util.flask.cached(timeout=-1,
-                   refreshif=lambda cached: _validate_cache_for_index(cached),
-                   key=_cache_key,
-                   unless_response=lambda response: util.flask.cache_check_response_headers(response))
-@util.flask.etagged(lambda _: _compute_etag_for_index())
-@util.flask.lastmodified(lambda _: _compute_date_for_index())
+@util.flask.fully_cached(key=_cache_key,
+                         etag=lambda l: _compute_etag_for_index(),
+                         lm=lambda: _compute_date_for_index(),
+                         check_conditional=lambda: _check_etag_and_lastmodified_for_index(),
+                         validate_cache=lambda cached: _validate_cache_for_index(cached))
 def index():
 	#~~ a bunch of settings
 

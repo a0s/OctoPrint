@@ -10,7 +10,6 @@ from flask import request, make_response, jsonify
 from octoprint.server import printer, NO_CONTENT
 from octoprint.server.util.flask import restricted_access, get_json_command_from_request, non_caching
 from octoprint.server.api import api
-import octoprint.util as util
 
 
 @api.route("/job", methods=["POST"])

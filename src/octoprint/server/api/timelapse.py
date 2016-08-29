@@ -10,21 +10,28 @@ from flask import request, jsonify, url_for, make_response
 import octoprint.timelapse
 from octoprint.settings import valid_boolean_trues
 
-from octoprint.server import admin_permission, printer, NOT_MODIFIED
+from octoprint.server import admin_permission, printer
 from octoprint.server.util.flask import redirect_to_tornado, restricted_access, \
-	etagged, lastmodified, conditional, check_etag_and_lastmodified, non_caching, \
-	get_json_command_from_request
+	non_caching, get_json_command_from_request, cache_all_invalidated, invalidate_all_keys_matching, \
+	fully_cached
 from octoprint.server.api import api
+from octoprint.events import eventManager, Events
 
 from octoprint.server import NO_CONTENT
 
 
 #~~ timelapse handling
 
+def register_event_listeners():
+	def movie_done(event, payload):
+		invalidate_all_keys_matching(lambda key: key.endswith("/timelapse:both") or key.endswith("/timelapse:unrendered"))
 
-def compute_etag(lm=None):
+	eventManager().subscribe(Events.MOVIE_DONE, movie_done)
+
+
+def _compute_etag(lm=None):
 	if lm is None:
-		lm = compute_lastmodified()
+		lm = _compute_lastmodified()
 
 	timelapse = octoprint.timelapse.current
 
@@ -32,11 +39,11 @@ def compute_etag(lm=None):
 	hash = hashlib.sha1()
 	hash.update(str(lm) if lm else "")
 	hash.update(repr(timelapse))
-	hash.update("incl_unrendered" if "unrendered" in request.values and request.values["unredered"] in valid_boolean_trues else "")
+	hash.update("both" if request.values.get("unrendered", "false") in valid_boolean_trues else "finished")
 	return hash.hexdigest()
 
 
-def compute_lastmodified():
+def _compute_lastmodified():
 	last_modified_finished = octoprint.timelapse.last_modified_finished
 	last_modified_unrendered = octoprint.timelapse.last_modified_unrendered
 
@@ -46,19 +53,11 @@ def compute_lastmodified():
 	return max(last_modified_finished, last_modified_unrendered)
 
 
-def check_conditional():
-	lm = compute_lastmodified()
-	if not lm:
-		return False
-
-	etag = compute_etag(lm)
-	return check_etag_and_lastmodified(etag, lm)
-
-
 @api.route("/timelapse", methods=["GET"])
-@conditional(lambda: check_conditional(), NOT_MODIFIED)
-@etagged(lambda _: compute_etag())
-@lastmodified(lambda _: compute_lastmodified())
+@fully_cached(key=lambda: "view:{}:{}".format(request.base_url,
+                                              "both" if request.values.get("unrendered", "false") in valid_boolean_trues else "finished"),
+              etag=lambda l: _compute_etag(lm=l),
+              lm=_compute_lastmodified)
 def getTimelapseData():
 	timelapse = octoprint.timelapse.current
 
@@ -95,6 +94,7 @@ def downloadTimelapse(filename):
 
 
 @api.route("/timelapse/<filename>", methods=["DELETE"])
+@cache_all_invalidated(lambda key: key.endswith("/timelapse:finished") or key.endswith("/timelapse:both"))
 @restricted_access
 def deleteTimelapse(filename):
 	octoprint.timelapse.delete_finished_timelapse(filename)
@@ -102,6 +102,7 @@ def deleteTimelapse(filename):
 
 
 @api.route("/timelapse/unrendered/<name>", methods=["DELETE"])
+@cache_all_invalidated(lambda key: key.endswith("/timelapse:finished") or key.endswith("/timelapse:both"))
 @restricted_access
 def deleteUnrenderedTimelapse(name):
 	octoprint.timelapse.delete_unrendered_timelapse(name)
@@ -124,11 +125,13 @@ def processUnrenderedTimelapseCommand(name):
 		if printer.is_printing() or printer.is_paused():
 			return make_response("Printer is currently printing, cannot render timelapse", 409)
 		octoprint.timelapse.render_unrendered_timelapse(name)
+		invalidate_all_keys_matching(lambda key: key.endswith("/timelapse:finished") or key.endswith("/timelapse:both"))
 
 	return NO_CONTENT
 
 
 @api.route("/timelapse", methods=["POST"])
+@cache_all_invalidated(lambda key: key.endswith("/timelapse:finished") or key.endswith("/timelapse:both"))
 @restricted_access
 def setTimelapseConfig():
 	if "type" in request.values:

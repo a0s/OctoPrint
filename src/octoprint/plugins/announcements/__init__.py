@@ -18,8 +18,8 @@ import threading
 import feedparser
 import flask
 
-from octoprint.server import admin_permission
-from octoprint.server.util.flask import restricted_access
+from octoprint.server import admin_permission, NOT_MODIFIED
+from octoprint.server.util.flask import restricted_access, etagged, conditional, no_browser_caching, check_etag
 from flask.ext.babel import gettext
 
 class AnnouncementPlugin(octoprint.plugin.AssetPlugin,
@@ -92,6 +92,9 @@ class AnnouncementPlugin(octoprint.plugin.AssetPlugin,
 
 	# Blueprint Plugin
 
+	def is_blueprint_cachable(self):
+		return True
+
 	@octoprint.plugin.BlueprintPlugin.route("/channels", methods=["GET"])
 	@restricted_access
 	@admin_permission.require(403)
@@ -101,6 +104,9 @@ class AnnouncementPlugin(octoprint.plugin.AssetPlugin,
 		result = dict()
 
 		force = "force" in flask.request.values and flask.request.values["force"] in valid_boolean_trues
+
+		if not force and check_etag(self._compute_channel_etag()):
+			return NOT_MODIFIED
 
 		channel_data = self._fetch_all_channels(force=force)
 		channel_configs = self._get_channel_configs(force=force)
@@ -125,7 +131,11 @@ class AnnouncementPlugin(octoprint.plugin.AssetPlugin,
 			                   data=entries,
 			                   unread=unread)
 
-		return flask.jsonify(result)
+		etag = self._compute_channel_etag()
+
+		response = flask.make_response(flask.jsonify(result))
+		response.set_etag(etag)
+		return response
 
 	@octoprint.plugin.BlueprintPlugin.route("/channels/<channel>", methods=["POST"])
 	@restricted_access
@@ -313,6 +323,23 @@ class AnnouncementPlugin(octoprint.plugin.AssetPlugin,
 		safe_key = self._slugify(key)
 		return os.path.join(self.get_plugin_data_folder(), "{}.cache".format(safe_key))
 
+	def _compute_channel_etag(self):
+		import hashlib
+		hash = hashlib.sha1()
+
+		all_channels = self._fetch_all_channels()
+		channel_configs = self._get_channel_configs()
+
+		sorted_keys = sorted(all_channels.keys())
+		for key in sorted_keys:
+			read_until = channel_configs[key].get("read_until")
+			try:
+				hash.update(all_channels[key]["feed"]["updated"])
+				hash.update(str(read_until) if read_until else "")
+			except:
+				self._logger.exception("Error while trying to generate ETag based on channel {}".format(key))
+
+		return hash.hexdigest()
 
 _image_tag_re = re.compile(r'<img.*?/?>')
 def _strip_images(text):

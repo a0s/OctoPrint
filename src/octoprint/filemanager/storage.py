@@ -26,7 +26,6 @@ class StorageInterface(object):
 	Interface of storage adapters for OctoPrint.
 	"""
 
-
 	@property
 	def analysis_backlog(self):
 		"""
@@ -40,6 +39,13 @@ class StorageInterface(object):
 		# empty generator pattern, yield is intentionally unreachable
 		return
 		yield
+
+	def last_modified(self, path=None):
+		"""
+		Get the last modification date of the specified path's subtree or
+		- if no path is provided - the whole storage.
+		"""
+		raise NotImplementedError()
 
 	def file_exists(self, path):
 		"""
@@ -385,6 +391,11 @@ class LocalFileStorage(StorageInterface):
 			elif os.path.isdir(absolute_path):
 				for sub_entry in self._analysis_backlog_generator(absolute_path):
 					yield self.join_path(entry, sub_entry[0]), sub_entry[1], sub_entry[2]
+
+	def last_modified(self, path=None):
+		if path is None:
+			path = self.basefolder
+		return max(os.stat(root).st_mtime for root, _, _ in os.walk(path))
 
 	def file_exists(self, path):
 		path, name = self.sanitize(path)

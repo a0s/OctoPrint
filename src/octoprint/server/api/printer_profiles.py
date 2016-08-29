@@ -14,7 +14,7 @@ from werkzeug.exceptions import BadRequest
 from octoprint.server import NOT_MODIFIED
 from octoprint.server.api import api, NO_CONTENT
 from octoprint.server.util.flask import restricted_access, etagged, lastmodified, \
-	conditional, check_etag_and_lastmodified, non_caching
+	conditional, check_etag_and_lastmodified, non_caching, no_browser_caching
 from octoprint.util import dict_merge
 
 from octoprint.server import printerProfileManager
@@ -43,6 +43,7 @@ def check_conditional():
 @conditional(lambda: check_conditional(), NOT_MODIFIED)
 @etagged(lambda _: compute_etag())
 @lastmodified(lambda _: compute_lastmodified())
+@no_browser_caching()
 def printerProfilesList():
 	all_profiles = printerProfileManager.get_all()
 	return jsonify(dict(profiles=_convert_profiles(all_profiles)))

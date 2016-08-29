@@ -14,11 +14,9 @@ from octoprint.events import eventManager, Events
 from octoprint.settings import settings
 from octoprint.printer import get_connection_options
 
-from octoprint.server import admin_permission, NOT_MODIFIED
+from octoprint.server import admin_permission
 from octoprint.server.api import api
-from octoprint.server.util.flask import restricted_access, cached, \
-	cache_check_response_headers, etagged, lastmodified, conditional, \
-	check_for_refresh, check_etag_and_lastmodified
+from octoprint.server.util.flask import restricted_access, fully_cached
 
 import octoprint.plugin
 import octoprint.util
@@ -37,12 +35,8 @@ def compute_lastmodified():
 	return settings().last_modified
 
 @api.route("/settings", methods=["GET"])
-@conditional(lambda: check_etag_and_lastmodified(compute_etag(), compute_lastmodified()), NOT_MODIFIED)
-@cached(timeout=10 * 60,
-        refreshif=lambda cached: check_for_refresh(cached, compute_etag()),
-        unless_response=lambda response: cache_check_response_headers(response))
-@etagged(lambda _: compute_etag())
-@lastmodified(lambda _: compute_lastmodified())
+@fully_cached(etag=lambda l: compute_etag(),
+              lm=compute_lastmodified)
 def getSettings():
 	logger = logging.getLogger(__name__)
 
